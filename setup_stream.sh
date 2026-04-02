@@ -25,13 +25,19 @@ fi
 
 # Step 1: Copy stream.py to the pi home directory
 echo "[1/4] Copying stream.py to /home/pi/stream.py..."
-cp "$STREAM_PY" /home/pi/stream.py
-chown pi:pi /home/pi/stream.py
-chmod 755 /home/pi/stream.py
+# Detect the non-root user's home directory
+TARGET_USER=${SUDO_USER:-pi}
+TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+
+cp "$STREAM_PY" "$TARGET_HOME/stream.py"
+chown "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/stream.py"
+chmod 755 "$TARGET_HOME/stream.py"
 
 # Step 2: Copy the systemd unit file into place
+# Patch the service file with the actual username and home directory before installing
 echo "[2/4] Installing stream.service to /etc/systemd/system/..."
-cp "$SERVICE_FILE" /etc/systemd/system/stream.service
+sed "s|User=pi|User=$TARGET_USER|g; s|/home/pi/|$TARGET_HOME/|g" \
+    "$SERVICE_FILE" > /etc/systemd/system/stream.service
 chmod 644 /etc/systemd/system/stream.service
 
 # Step 3: Reload systemd so it picks up the new unit
