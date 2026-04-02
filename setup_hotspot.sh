@@ -14,7 +14,8 @@ echo "[1/6] Installing hostapd and dnsmasq..."
 apt-get update -qq
 apt-get install -y hostapd dnsmasq
 
-# Unmask hostapd — it is masked by default on Raspberry Pi OS
+# Unmask hostapd AFTER install — apt masks it by default on Debian/Trixie,
+# so unmasking before install gets overwritten by the postinst script.
 systemctl unmask hostapd
 
 # Step 2: Write hostapd configuration
@@ -71,8 +72,9 @@ dhcp-host=pi,192.168.4.1
 EOF
 
 # Step 4: Set a static IP on wlan0
-# Bookworm uses /etc/network/interfaces.d/ for per-interface config.
+# /etc/network/interfaces.d/ may not exist on Trixie — create it if needed.
 echo "[4/6] Writing /etc/network/interfaces.d/wlan0..."
+mkdir -p /etc/network/interfaces.d
 cat > /etc/network/interfaces.d/wlan0 << 'EOF'
 # Static IP for wlan0 — required for the hotspot to have a fixed address
 
