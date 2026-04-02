@@ -26,7 +26,7 @@ STREAM_PATH = "/stream"
 #   --codec mjpeg  output raw MJPEG frames (not H.264) so we can boundary-split them
 #   -o -           write to stdout
 LIBCAMERA_CMD = [
-    "libcamera-vid",
+    "rpicam-vid",       # Trixie/Bookworm renamed libcamera-vid -> rpicam-vid
     "-t", "0",
     "--width", "1920",
     "--height", "1080",
