@@ -84,10 +84,14 @@ AUTODETECT_LINE="camera_auto_detect=0"
 echo ""
 echo "[4/4] Updating $CONFIG..."
 
-# Disable camera_auto_detect if it's currently enabled (set to 1)
+# Disable camera_auto_detect — handles all cases: =1, commented out, or absent
 if grep -q "^camera_auto_detect=1" "$CONFIG"; then
     sed -i "s/^camera_auto_detect=1/camera_auto_detect=0/" "$CONFIG"
     echo "    Set camera_auto_detect=0"
+elif grep -q "^#.*camera_auto_detect" "$CONFIG"; then
+    # Commented out — append an explicit =0 line after it
+    sed -i "s/^#.*camera_auto_detect.*/&\ncamera_auto_detect=0/" "$CONFIG"
+    echo "    Added: camera_auto_detect=0"
 elif ! grep -q "^camera_auto_detect" "$CONFIG"; then
     echo "" >> "$CONFIG"
     echo "$AUTODETECT_LINE" >> "$CONFIG"
@@ -110,7 +114,7 @@ echo "NEXT STEP: Reboot the Pi now:"
 echo "    sudo reboot"
 echo ""
 echo "After reboot, verify the camera is detected:"
-echo "    libcamera-hello --list-cameras"
+echo "    rpicam-hello --list-cameras"
 echo ""
 echo "You should see 'imx519' listed as cam0."
 echo ""

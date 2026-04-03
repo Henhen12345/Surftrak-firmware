@@ -40,11 +40,34 @@ echo "[1/8] Installing Python BLE library (bless)..."
 pip install bless --break-system-packages
 echo ""
 
-# ── Step 2: Enable Bluetooth ─────────────────────────────────────────────────
+# ── Step 2: Configure and enable Bluetooth ───────────────────────────────────
 
-echo "[2/8] Enabling Bluetooth service..."
+echo "[2/8] Configuring Bluetooth..."
+
+# Enable experimental mode in BlueZ — required for GATT peripheral advertising
+BTCONF=/etc/bluetooth/main.conf
+if ! grep -q "^Experimental = true" "$BTCONF"; then
+    sed -i '/\[General\]/a Experimental = true' "$BTCONF"
+    echo "    Added Experimental = true to $BTCONF"
+fi
+
+# Add --experimental flag to bluetoothd if not already present
+BTSVC=/lib/systemd/system/bluetooth.service
+if ! grep -q "\-\-experimental" "$BTSVC"; then
+    sed -i 's|ExecStart=/usr/libexec/bluetooth/bluetoothd|ExecStart=/usr/libexec/bluetooth/bluetoothd --experimental|' "$BTSVC"
+    echo "    Added --experimental to bluetoothd"
+fi
+
+# Unblock Bluetooth in case rfkill is blocking it
+rfkill unblock bluetooth 2>/dev/null || true
+
+systemctl daemon-reload
 systemctl enable bluetooth
-systemctl start bluetooth
+systemctl restart bluetooth
+sleep 2
+
+# Power on the Bluetooth adapter
+bluetoothctl power on || true
 echo ""
 
 # ── Step 3: Create recordings directory ──────────────────────────────────────
