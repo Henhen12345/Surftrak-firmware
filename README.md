@@ -1,6 +1,8 @@
 # SurfTrak Firmware
 
-Raspberry Pi Zero 2W firmware that broadcasts a WiFi hotspot and streams live video from an Arducam IMX519 (16MP) camera. Connect any device to the hotspot and open a browser to watch the stream.
+BLE-controlled surf session recorder for Raspberry Pi Zero 2W.
+Pairs with the SurfTrak iOS app over Bluetooth to start/stop recording.
+Downloads H.264 clips to the app over WiFi for AI processing.
 
 ---
 
@@ -9,218 +11,187 @@ Raspberry Pi Zero 2W firmware that broadcasts a WiFi hotspot and streams live vi
 | Part | Detail |
 |---|---|
 | Pi | Raspberry Pi Zero 2W |
-| OS | Raspberry Pi OS Lite (Bookworm, 64-bit) |
+| OS | Raspberry Pi OS Lite (Bookworm or Trixie, 64-bit) |
 | Camera | Arducam IMX519 16MP (CSI ribbon cable) |
+| Network | Pi and iPhone on the same WiFi network |
 
 ---
 
-## Setup Order
+## Setup
 
-### Step 0 — Flash the SD card
+### 1. Flash the SD card
 
-1. Flash **Raspberry Pi OS Lite (64-bit, Bookworm)** with Raspberry Pi Imager.
-2. In Imager's advanced settings, enable SSH and set username `pi` / your password.
-3. Boot the Pi on a normal WiFi network (or wired) for the initial install.
+Flash **Raspberry Pi OS Lite (64-bit)** with Raspberry Pi Imager.
+In advanced settings: enable SSH, set username + password.
 
----
-
-### Step 1 — Install the Arducam IMX519 driver
-
-The IMX519 is not natively supported by Pi OS — you must install the Arducam driver first.
+### 2. Install the Arducam driver
 
 ```bash
 sudo bash install_arducam.sh
 sudo reboot
 ```
 
-After reboot, verify the camera:
+After reboot, verify:
 
 ```bash
-libcamera-hello --list-cameras
+rpicam-hello --list-cameras
+# Should list: imx519
 ```
 
-You should see `imx519` listed as `cam0`. If not, see [Troubleshooting](#troubleshooting).
+### 3. Connect the Pi to your WiFi network
 
----
+Ensure the Pi and your iPhone are on the **same WiFi network**.
 
-### Step 2 — Run the master setup script
+### 4. Run the firmware installer
 
 ```bash
+cd ~/Surftrak-firmware
 sudo bash setup_all.sh
 ```
 
-This will:
-- Install and configure `hostapd` + `dnsmasq` for the WiFi hotspot
-- Install `stream.py` and enable it as a systemd service
+This installs and starts both services. No reboot needed.
 
-When it finishes, reboot:
+---
 
-```bash
-sudo reboot
+## How it works
+
+```
+iOS app  ──BLE──►  Pi: "START"  →  rpicam-vid begins recording H.264
+iOS app  ──BLE──►  Pi: "STOP"   →  recording stops, clip list notified
+iOS app  ──WiFi─►  GET /clips   →  JSON list of recordings
+iOS app  ──WiFi─►  GET /clips/<filename>  →  download H.264 file
+```
+
+1. iOS app scans BLE → finds **SurfTrak** → connects
+2. App sends `START` → Pi records to `/home/<user>/recordings/surf_YYYY-MM-DD_HH-MM-SS.h264`
+3. App sends `STOP` → Pi stops recording, notifies app of updated clip list
+4. App fetches `http://<Pi-IP>:8080/clips` to see available recordings
+5. App downloads clip via `http://<Pi-IP>:8080/clips/<filename>`
+
+---
+
+## BLE Profile
+
+| Item | UUID |
+|---|---|
+| Service | `12345678-1234-1234-1234-123456789012` |
+| Record char | `12345678-1234-1234-1234-123456789013` |
+| Status char | `12345678-1234-1234-1234-123456789014` |
+| Clips char | `12345678-1234-1234-1234-123456789015` |
+
+**Record** (write without response): send `START` or `STOP`
+
+**Status** (notify): receives `RECORDING`, `IDLE`, or `ERROR:<message>`
+
+**Clips** (read + notify): JSON array of filenames, newest first
+```json
+["surf_2026-04-02_14-30-00.h264", "surf_2026-04-02_13-00-00.h264"]
 ```
 
 ---
 
-## Connecting your iPhone
+## HTTP File Server API
 
-### 1. Join the SurfTrak hotspot
+Base URL: `http://<Pi-IP>:8080`
 
-1. On iPhone, go to **Settings → Wi-Fi**
-2. Select **SurfTrak**
-3. Enter password: **surftrak1**
-4. Wait for the checkmark — you are now on the Pi's local network
+| Method | Path | Description |
+|---|---|---|
+| GET | `/clips` | JSON list of all clips (name, size, created) |
+| GET | `/clips/<filename>` | Download H.264 file |
+| DELETE | `/clips/<filename>` | Delete a clip |
+| GET | `/status` | Recording state + disk space |
 
-### 2. Watch the live stream in Safari
+### Example responses
 
-1. Open **Safari**
-2. Type this URL in the address bar:
-
+`GET /clips`
+```json
+{
+  "clips": [
+    {"name": "surf_2026-04-02_14-30-00.h264", "size": 104857600, "created": "2026-04-02T14:30:00"}
+  ]
+}
 ```
-http://192.168.4.1:8080/stream
+
+`GET /status`
+```json
+{"recording": false, "current_clip": null, "clip_count": 3, "disk_free_gb": 12.4}
 ```
-
-3. The live camera feed will appear immediately. No app needed.
-
-> **Tip:** You can also open `http://192.168.4.1:8080/` for a full-screen HTML page that embeds the stream.
 
 ---
 
-## SSH into the Pi from a Mac
-
-Once your Mac is connected to the SurfTrak hotspot:
+## Useful commands
 
 ```bash
-ssh pi@192.168.4.1
-```
+# Service status
+systemctl status ble_server
+systemctl status file_server
 
-Enter the password you set during Raspberry Pi Imager setup.
+# Live logs
+sudo journalctl -u ble_server -f
+sudo journalctl -u file_server -f
 
----
+# List recordings
+ls -lh ~/recordings/
 
-## Checking service status
+# Test file server from the Pi itself
+curl http://localhost:8080/clips
+curl http://localhost:8080/status
 
-SSH into the Pi, then:
-
-```bash
-# Is the hotspot running?
-sudo systemctl status hostapd
-sudo systemctl status dnsmasq
-
-# Is the stream running?
-sudo systemctl status stream
-
-# Watch live stream logs
-sudo journalctl -u stream -f
+# Find Pi IP (for use in iOS app)
+hostname -I | awk '{print $1}'
 ```
 
 ---
 
 ## Troubleshooting
 
-### Camera not detected after reboot
+### BLE not advertising
 
 ```bash
-libcamera-hello --list-cameras
-# Should show: Available cameras: imx519 [cam0]
+sudo systemctl status bluetooth
+sudo systemctl restart bluetooth
+sudo journalctl -u ble_server -n 50
 ```
 
-**If not detected:**
+Ensure Bluetooth is not blocked:
+```bash
+rfkill list
+sudo rfkill unblock bluetooth
+```
 
-1. **Check ribbon cable.** The Zero 2W uses a 22-pin to 15-pin CSI adapter. Confirm the cable is fully inserted and the locking tab is closed at both ends.
-2. **Check the overlay is in config.txt:**
-   ```bash
-   grep arducam /boot/firmware/config.txt
-   # Should show: dtoverlay=arducam-pivariety,cam0
-   ```
-3. **Check the kernel module loaded:**
-   ```bash
-   lsmod | grep arducam
-   ```
-4. **Check dmesg for errors:**
-   ```bash
-   dmesg | grep -i 'imx\|arducam\|csi\|unicam'
-   ```
-5. **Confirm you're running 64-bit OS:**
-   ```bash
-   uname -m   # should say aarch64
-   ```
+### Camera not detected
 
----
+```bash
+rpicam-hello --list-cameras
+dmesg | grep -i imx519
+```
 
-### Hotspot not appearing on iPhone
+Check ribbon cable orientation and seating (see `install_arducam.sh` comments).
 
-1. **Check hostapd is running:**
-   ```bash
-   sudo systemctl status hostapd
-   ```
-2. **Look at hostapd logs:**
-   ```bash
-   sudo journalctl -u hostapd -n 50
-   ```
-3. **Confirm wlan0 has the static IP:**
-   ```bash
-   ip addr show wlan0
-   # Should show: inet 192.168.4.1/24
-   ```
-4. **rfkill blocking WiFi?**
-   ```bash
-   rfkill list
-   # If wlan is "Soft blocked: yes", run: sudo rfkill unblock wifi
-   ```
-5. **Restart hostapd manually:**
-   ```bash
-   sudo systemctl restart hostapd
-   ```
+### File server not reachable from iPhone
+
+- Confirm iPhone and Pi are on the same WiFi network
+- Get Pi IP: `hostname -I | awk '{print $1}'`
+- Test: `curl http://<Pi-IP>:8080/status`
+- Check service: `systemctl status file_server`
+
+### Recording fails to start
+
+```bash
+sudo journalctl -u ble_server -n 50
+# Look for rpicam-vid errors
+rpicam-vid -t 3000 --width 1920 --height 1080 --framerate 30 --codec h264 -o /tmp/test.h264
+```
 
 ---
 
-### Stream not loading in Safari
-
-1. **Confirm iPhone is on SurfTrak WiFi** (not LTE/5G — disable mobile data if needed).
-2. **Check stream service is running:**
-   ```bash
-   sudo systemctl status stream
-   ```
-3. **Check stream logs:**
-   ```bash
-   sudo journalctl -u stream -n 50
-   ```
-4. **Confirm stream is listening on port 8080:**
-   ```bash
-   ss -tlnp | grep 8080
-   ```
-5. **Restart the stream manually:**
-   ```bash
-   sudo systemctl restart stream
-   ```
-6. **Test with curl from the Pi itself:**
-   ```bash
-   curl -v http://192.168.4.1:8080/stream --max-time 3
-   # Should return: Content-Type: multipart/x-mixed-replace
-   ```
-
----
-
-## File Overview
+## File overview
 
 | File | Purpose |
 |---|---|
 | `install_arducam.sh` | Installs Arducam IMX519 kernel driver |
-| `setup_hotspot.sh` | Configures hostapd + dnsmasq WiFi hotspot |
-| `setup_stream.sh` | Installs stream service |
-| `setup_all.sh` | Master script — runs hotspot + stream setup |
-| `stream.py` | MJPEG HTTP streaming server |
-| `stream.service` | systemd unit file for stream.py |
-
----
-
-## Network Reference
-
-| Item | Value |
-|---|---|
-| SSID | SurfTrak |
-| Password | surftrak1 |
-| Pi IP | 192.168.4.1 |
-| Stream URL | http://192.168.4.1:8080/stream |
-| SSH | ssh pi@192.168.4.1 |
-| DHCP range | 192.168.4.10 – 192.168.4.50 |
+| `ble_server.py` | BLE peripheral — handles START/STOP, controls rpicam-vid |
+| `file_server.py` | HTTP server — clip listing and download over WiFi |
+| `ble_server.service` | systemd unit for ble_server.py |
+| `file_server.service` | systemd unit for file_server.py |
+| `setup_all.sh` | Installs everything and starts both services |

@@ -1,0 +1,18 @@
+[Unit]
+Description=SurfTrak BLE Peripheral Server
+# Bluetooth must be up before we can advertise
+After=bluetooth.target network.target
+Requires=bluetooth.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi
+ExecStart=/usr/bin/python3 /home/pi/ble_server.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

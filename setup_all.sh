@@ -1,85 +1,119 @@
 #!/bin/bash
-# setup_all.sh
-# Master setup script for SurfTrak firmware.
-# Orchestrates hotspot + stream service installation.
-#
-# PREREQUISITES (must be done manually before running this script):
-#   1. Run install_arducam.sh as root
-#   2. Reboot the Pi
-#   3. Confirm camera is detected: libcamera-hello --list-cameras
-#
-# Then run this script as root: sudo bash setup_all.sh
+# setup_all.sh — SurfTrak firmware installer.
+# Installs BLE server + HTTP file server as systemd services.
+# Must be run as root: sudo bash setup_all.sh
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ── Banner ────────────────────────────────────────────────────────────────────
+# Detect the real (non-root) user and their home directory
+TARGET_USER="${SUDO_USER:-pi}"
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║          SurfTrak Firmware Setup             ║"
+echo "║         SurfTrak Firmware Installer          ║"
 echo "╚══════════════════════════════════════════════╝"
+echo ""
+echo "Installing for user : $TARGET_USER"
+echo "Home directory      : $TARGET_HOME"
 echo ""
 
 # ── Prerequisite check ────────────────────────────────────────────────────────
 
-echo "IMPORTANT: This script assumes you have already:"
-echo "  [1] Run install_arducam.sh"
-echo "  [2] Rebooted the Pi"
-echo "  [3] Verified the camera: libcamera-hello --list-cameras"
+echo "IMPORTANT: Before continuing, confirm:"
+echo "  [1] You ran: sudo bash install_arducam.sh"
+echo "  [2] You rebooted after the driver install"
+echo "  [3] Camera is visible: rpicam-hello --list-cameras"
 echo ""
-read -r -p "Have you completed those steps? (yes/no): " CONFIRMED
-
+read -r -p "Confirmed? (yes/no): " CONFIRMED
 if [ "$CONFIRMED" != "yes" ]; then
-    echo ""
-    echo "Please complete the Arducam driver install first:"
-    echo "    sudo bash $SCRIPT_DIR/install_arducam.sh"
-    echo "    sudo reboot"
-    echo ""
-    echo "Then re-run this script after reboot."
+    echo "Run install_arducam.sh first, then reboot, then re-run this script."
     exit 1
 fi
-
 echo ""
 
-# ── Step 1: Hotspot ───────────────────────────────────────────────────────────
+# ── Step 1: Install bless (BLE peripheral library) ───────────────────────────
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Step 1/2: Configuring WiFi hotspot..."
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-bash "$SCRIPT_DIR/setup_hotspot.sh"
+echo "[1/8] Installing Python BLE library (bless)..."
+pip install bless --break-system-packages
 echo ""
 
-# ── Step 2: Stream service ────────────────────────────────────────────────────
+# ── Step 2: Enable Bluetooth ─────────────────────────────────────────────────
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Step 2/2: Installing video stream service..."
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-bash "$SCRIPT_DIR/setup_stream.sh"
+echo "[2/8] Enabling Bluetooth service..."
+systemctl enable bluetooth
+systemctl start bluetooth
 echo ""
 
-# ── Final summary ─────────────────────────────────────────────────────────────
+# ── Step 3: Create recordings directory ──────────────────────────────────────
+
+echo "[3/8] Creating recordings directory..."
+mkdir -p "$TARGET_HOME/recordings"
+chown "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/recordings"
+echo "    Created: $TARGET_HOME/recordings"
+echo ""
+
+# ── Step 4: Copy Python scripts ──────────────────────────────────────────────
+
+echo "[4/8] Copying ble_server.py and file_server.py..."
+cp "$SCRIPT_DIR/ble_server.py"   "$TARGET_HOME/ble_server.py"
+cp "$SCRIPT_DIR/file_server.py"  "$TARGET_HOME/file_server.py"
+chown "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/ble_server.py" "$TARGET_HOME/file_server.py"
+chmod 755 "$TARGET_HOME/ble_server.py" "$TARGET_HOME/file_server.py"
+echo ""
+
+# ── Step 5: Install systemd service files ────────────────────────────────────
+
+echo "[5/8] Installing systemd service files..."
+
+# Patch User= and home directory paths to match the real username
+for SVC in ble_server file_server; do
+    sed "s|User=pi|User=$TARGET_USER|g; s|/home/pi/|$TARGET_HOME/|g" \
+        "$SCRIPT_DIR/${SVC}.service" > "/etc/systemd/system/${SVC}.service"
+    chmod 644 "/etc/systemd/system/${SVC}.service"
+    echo "    Installed: /etc/systemd/system/${SVC}.service"
+done
+echo ""
+
+# ── Step 6: Reload systemd ────────────────────────────────────────────────────
+
+echo "[6/8] Reloading systemd daemon..."
+systemctl daemon-reload
+echo ""
+
+# ── Step 7: Enable services ───────────────────────────────────────────────────
+
+echo "[7/8] Enabling services on boot..."
+systemctl enable ble_server.service
+systemctl enable file_server.service
+echo ""
+
+# ── Step 8: Start services ────────────────────────────────────────────────────
+
+echo "[8/8] Starting services..."
+systemctl start file_server.service
+systemctl start ble_server.service
+echo ""
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+
+PI_IP=$(hostname -I | awk '{print $1}')
 
 echo "╔══════════════════════════════════════════════╗"
-echo "║              Setup Complete!                 ║"
+echo "║          SurfTrak firmware installed!        ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
-echo "Reboot the Pi to activate everything:"
-echo "    sudo reboot"
+echo "  BLE       : Pi advertising as 'SurfTrak'"
+echo "  File server: http://${PI_IP}:8080"
+echo "  Recordings : $TARGET_HOME/recordings/"
 echo ""
-echo "After reboot:"
-echo "  ┌─ iPhone / Mac ──────────────────────────────────────────┐"
-echo "  │  Connect to WiFi : SurfTrak                             │"
-echo "  │  Password        : surftrak1                            │"
-echo "  └─────────────────────────────────────────────────────────┘"
-echo ""
-echo "  ┌─ Watch live video ──────────────────────────────────────┐"
-echo "  │  Open Safari and go to:                                 │"
-echo "  │      http://192.168.4.1:8080/stream                     │"
-echo "  └─────────────────────────────────────────────────────────┘"
-echo ""
-echo "  ┌─ SSH access ────────────────────────────────────────────┐"
-echo "  │      ssh pi@192.168.4.1                                 │"
-echo "  └─────────────────────────────────────────────────────────┘"
+echo "  Useful commands:"
+echo "    sudo journalctl -u ble_server -f     # BLE logs"
+echo "    sudo journalctl -u file_server -f    # File server logs"
+echo "    systemctl status ble_server"
+echo "    systemctl status file_server"
+echo "    ls -lh $TARGET_HOME/recordings/"
+echo "    curl http://localhost:8080/clips"
 echo ""
