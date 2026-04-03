@@ -31,15 +31,12 @@ CHUNK_SIZE     = 65536   # 64 KB chunks for large file streaming
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def get_clips() -> list:
-    """Return clip metadata sorted newest first."""
+    """Return clip metadata sorted newest first. MP4 preferred, h264 fallback."""
     if not RECORDINGS_DIR.exists():
         return []
+    all_clips = list(RECORDINGS_DIR.glob("*.mp4")) + list(RECORDINGS_DIR.glob("*.h264"))
     clips = []
-    for p in sorted(
-        RECORDINGS_DIR.glob("*.h264"),
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    ):
+    for p in sorted(all_clips, key=lambda f: f.stat().st_mtime, reverse=True):
         stat = p.stat()
         clips.append({
             "name": p.name,
@@ -104,7 +101,8 @@ class Handler(BaseHTTPRequestHandler):
 
         size = filepath.stat().st_size
         self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
+        content_type = "video/mp4" if filename.endswith(".mp4") else "application/octet-stream"
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(size))
         self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         # Disable caching — clips may be re-recorded with the same name

@@ -34,10 +34,11 @@ if [ "$CONFIRMED" != "yes" ]; then
 fi
 echo ""
 
-# ── Step 1: Install bless (BLE peripheral library) ───────────────────────────
+# ── Step 1: Install dependencies ─────────────────────────────────────────────
 
-echo "[1/8] Installing Python BLE library (bless)..."
+echo "[1/8] Installing dependencies (bless, ffmpeg)..."
 pip install bless --break-system-packages
+apt-get install -y ffmpeg
 echo ""
 
 # ── Step 2: Configure and enable Bluetooth ───────────────────────────────────

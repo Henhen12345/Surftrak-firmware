@@ -55,11 +55,11 @@ def write_state(recording: bool, clip: Optional[str]) -> None:
 
 
 def get_clips() -> list:
-    """Return list of clip filenames sorted newest first."""
+    """Return list of clip filenames sorted newest first. MP4 preferred, h264 fallback."""
     if not RECORDINGS_DIR.exists():
         return []
     clips = sorted(
-        RECORDINGS_DIR.glob("*.h264"),
+        list(RECORDINGS_DIR.glob("*.mp4")) + list(RECORDINGS_DIR.glob("*.h264")),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -104,8 +104,10 @@ def start_recording() -> None:
     RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    filename = f"surf_{ts}.h264"
-    filepath = RECORDINGS_DIR / filename
+    # Record to .h264 first; ffmpeg wraps it to .mp4 after STOP
+    h264_filename = f"surf_{ts}.h264"
+    mp4_filename  = f"surf_{ts}.mp4"
+    filepath = RECORDINGS_DIR / h264_filename
 
     cmd = [
         "rpicam-vid",
@@ -123,10 +125,11 @@ def start_recording() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        _current_clip = filename
-        write_state(True, filename)
+        # Track both names — h264 is the live file, mp4 is the final deliverable
+        _current_clip = (h264_filename, mp4_filename)
+        write_state(True, mp4_filename)
         notify_status("RECORDING")
-        print(f"[BLE] Recording started: {filename}", flush=True)
+        print(f"[BLE] Recording started: {h264_filename}", flush=True)
     except Exception as e:
         _proc = None
         _current_clip = None
@@ -142,7 +145,7 @@ def stop_recording() -> None:
         notify_status("IDLE")
         return
 
-    clip = _current_clip
+    clip_names = _current_clip  # (h264_filename, mp4_filename)
     try:
         _proc.terminate()
         try:
@@ -157,9 +160,57 @@ def stop_recording() -> None:
         _current_clip = None
 
     write_state(False, None)
+
+    # Wrap the raw H.264 in an MP4 container so iOS AVFoundation can read it
+    if clip_names:
+        h264_name, mp4_name = clip_names
+        h264_path = RECORDINGS_DIR / h264_name
+        mp4_path  = RECORDINGS_DIR / mp4_name
+        _wrap_to_mp4(h264_path, mp4_path)
+        print(f"[BLE] Recording stopped: {mp4_name}", flush=True)
+    else:
+        print("[BLE] Recording stopped.", flush=True)
+
     notify_status("IDLE")
     notify_clips()
-    print(f"[BLE] Recording stopped: {clip}", flush=True)
+
+
+def _wrap_to_mp4(h264_path: Path, mp4_path: Path) -> None:
+    """Convert raw H.264 elementary stream to MP4 container via ffmpeg."""
+    # Check ffmpeg is available before attempting conversion
+    if subprocess.run(["which", "ffmpeg"], capture_output=True).returncode != 0:
+        print("[BLE] WARNING: ffmpeg not found — keeping .h264 file as-is.", flush=True)
+        print("[BLE]   Install with: sudo apt-get install -y ffmpeg", flush=True)
+        return
+
+    if not h264_path.exists():
+        print(f"[BLE] ERROR: source file missing: {h264_path}", flush=True)
+        return
+
+    print(f"[BLE] Wrapping {h264_path.name} → {mp4_path.name} ...", flush=True)
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-framerate", "30",
+                "-i", str(h264_path),
+                "-c:v", "copy",
+                "-movflags", "+faststart",
+                str(mp4_path),
+            ],
+            capture_output=True,
+            timeout=300,  # 5-minute safety cap for very long recordings
+        )
+        if result.returncode == 0:
+            h264_path.unlink()  # Delete the raw .h264 now that .mp4 exists
+            print(f"[BLE] Conversion complete: {mp4_path.name}", flush=True)
+        else:
+            print(f"[BLE] ffmpeg failed (rc={result.returncode}) — keeping .h264", flush=True)
+            print(result.stderr.decode(errors="ignore")[-500:], flush=True)
+    except subprocess.TimeoutExpired:
+        print("[BLE] ffmpeg timed out — keeping .h264 file.", flush=True)
+    except Exception as e:
+        print(f"[BLE] ffmpeg error: {e} — keeping .h264 file.", flush=True)
 
 # ── GATT callbacks ────────────────────────────────────────────────────────────
 
