@@ -78,9 +78,10 @@ c = c.replace('struct v4l2_subdev_pad_config *', 'struct v4l2_subdev_state *')
 c = re.sub(r'\bcfg\b', 'sd_state', c)
 
 # 4. v4l2_subdev_get_try_format with fh->pad (arducam_open)
+#    v4l2_subdev_fh_get_state() doesn't exist in RPi 6.12 headers; use fh->state directly
 c = re.sub(
     r'v4l2_subdev_get_try_format\s*\(\s*\w+\s*,\s*fh\s*->\s*pad\s*,\s*',
-    'v4l2_subdev_state_get_format(v4l2_subdev_fh_get_state(fh), ',
+    'v4l2_subdev_state_get_format(fh->state, ',
     c
 )
 
