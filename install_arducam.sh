@@ -57,24 +57,19 @@ else
         "$DRIVER_SRC"
 fi
 
-# Write dkms.conf only if the repo doesn't already supply one
-if [ ! -f "$DRIVER_SRC/dkms.conf" ]; then
-    # Detect the module name from the Makefile (obj-m := <name>.o)
-    MODULE_NAME=$(grep -m1 'obj-m' "$DRIVER_SRC/Makefile" 2>/dev/null \
-        | sed 's/.*:=\s*//' | sed 's/\.o.*//' | tr -d ' ') || true
-
-    # Fall back to the known module name if detection fails
-    MODULE_NAME="${MODULE_NAME:-arducam_pivariety}"
-    echo "    Writing dkms.conf (module: $MODULE_NAME)..."
-
-    cat > "$DRIVER_SRC/dkms.conf" <<DKMS_CONF
+# Always write dkms.conf — the repo's source is in src/, so we must
+# point MAKE and BUILT_MODULE_LOCATION there explicitly.
+echo "    Writing dkms.conf..."
+cat > "$DRIVER_SRC/dkms.conf" <<DKMS_CONF
 PACKAGE_NAME="${DRIVER_NAME}"
 PACKAGE_VERSION="${DRIVER_VER}"
-BUILT_MODULE_NAME[0]="${MODULE_NAME}"
+MAKE[0]="make -C /lib/modules/\${kernelver}/build M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build/src"
+CLEAN="make -C /lib/modules/\${kernelver}/build M=\${dkms_tree}/\${PACKAGE_NAME}/\${PACKAGE_VERSION}/build/src clean"
+BUILT_MODULE_NAME[0]="arducam"
+BUILT_MODULE_LOCATION[0]="src/"
 DEST_MODULE_LOCATION[0]="/kernel/drivers/media/i2c/"
 AUTOINSTALL="yes"
 DKMS_CONF
-fi
 
 dkms add    "$DRIVER_NAME/$DRIVER_VER"
 dkms build  "$DRIVER_NAME/$DRIVER_VER"
