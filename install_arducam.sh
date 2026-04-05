@@ -57,6 +57,12 @@ else
         "$DRIVER_SRC"
 fi
 
+# Patch for kernel 6.x: asm/unaligned.h was moved to linux/unaligned.h
+if grep -q 'asm/unaligned.h' "$DRIVER_SRC/src/arducam.c" 2>/dev/null; then
+    sed -i 's|#include <asm/unaligned.h>|#include <linux/unaligned.h>|' "$DRIVER_SRC/src/arducam.c"
+    echo "    Patched: asm/unaligned.h -> linux/unaligned.h (kernel 6.x compat)"
+fi
+
 # Always write dkms.conf — the repo's source is in src/, so we must
 # point MAKE and BUILT_MODULE_LOCATION there explicitly.
 echo "    Writing dkms.conf..."
