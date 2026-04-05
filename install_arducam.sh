@@ -57,11 +57,71 @@ else
         "$DRIVER_SRC"
 fi
 
-# Patch for kernel 6.x: asm/unaligned.h was moved to linux/unaligned.h
-if grep -q 'asm/unaligned.h' "$DRIVER_SRC/src/arducam.c" 2>/dev/null; then
-    sed -i 's|#include <asm/unaligned.h>|#include <linux/unaligned.h>|' "$DRIVER_SRC/src/arducam.c"
-    echo "    Patched: asm/unaligned.h -> linux/unaligned.h (kernel 6.x compat)"
-fi
+# Patch arducam.c for kernel 6.x API changes
+echo "    Applying kernel 6.x compatibility patches..."
+python3 - <<'PYEOF'
+import re, sys
+
+src = '/usr/src/arducam-pivariety-1.0/src/arducam.c'
+with open(src) as f:
+    c = f.read()
+
+orig = c
+
+# 1. asm/unaligned.h -> linux/unaligned.h (moved in 6.1)
+c = c.replace('#include <asm/unaligned.h>', '#include <linux/unaligned.h>')
+
+# 2. struct v4l2_subdev_pad_config -> struct v4l2_subdev_state (5.14)
+c = c.replace('struct v4l2_subdev_pad_config *', 'struct v4l2_subdev_state *')
+
+# 3. rename parameter 'cfg' -> 'sd_state' everywhere (word boundary)
+c = re.sub(r'\bcfg\b', 'sd_state', c)
+
+# 4. v4l2_subdev_get_try_format with fh->pad (arducam_open)
+c = re.sub(
+    r'v4l2_subdev_get_try_format\s*\(\s*\w+\s*,\s*fh\s*->\s*pad\s*,\s*',
+    'v4l2_subdev_state_get_format(v4l2_subdev_fh_get_state(fh), ',
+    c
+)
+
+# 5. v4l2_subdev_get_try_format with sd_state (was cfg)
+c = re.sub(
+    r'v4l2_subdev_get_try_format\s*\([^,]+,\s*sd_state\s*,\s*',
+    'v4l2_subdev_state_get_format(sd_state, ',
+    c
+)
+
+# 6. v4l2_subdev_get_try_crop with sd_state (was cfg)
+c = re.sub(
+    r'v4l2_subdev_get_try_crop\s*\([^,]+,\s*sd_state\s*,\s*',
+    'v4l2_subdev_state_get_crop(sd_state, ',
+    c
+)
+
+# 7. v4l2_async_register_subdev_sensor_common -> _sensor (5.16)
+c = c.replace('v4l2_async_register_subdev_sensor_common',
+              'v4l2_async_register_subdev_sensor')
+
+# 8. i2c probe: remove const struct i2c_device_id *id param (6.3)
+c = re.sub(
+    r'(arducam_probe\s*\(\s*struct\s+i2c_client\s*\*\s*\w+)'
+    r'\s*,\s*const\s+struct\s+i2c_device_id\s*\*\s*\w+\s*(\))',
+    r'\1\2', c
+)
+
+# 9. i2c remove: int -> void, drop trailing 'return 0;' (6.3)
+c = re.sub(r'\bstatic\s+int\s+(arducam_remove\b)', r'static void \1', c)
+def drop_return(m):
+    return re.sub(r'\n[ \t]*return\s+0\s*;([ \t]*\n[ \t]*\})', r'\1', m.group(0))
+c = re.sub(r'static void arducam_remove\b[^}]*\}', drop_return, c, flags=re.DOTALL)
+
+if c == orig:
+    print('  WARNING: no changes made — source may already be patched or layout changed')
+else:
+    with open(src, 'w') as f:
+        f.write(c)
+    print('  Patches applied OK')
+PYEOF
 
 # Always write dkms.conf — the repo's source is in src/, so we must
 # point MAKE and BUILT_MODULE_LOCATION there explicitly.
