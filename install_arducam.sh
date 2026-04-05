@@ -24,7 +24,7 @@ apt-get update -qq
 apt-get install -y --no-install-recommends \
     dkms \
     git \
-    raspberrypi-kernel-headers \
+    "linux-headers-$(uname -r)" \
     build-essential
 echo "    Done."
 echo ""
