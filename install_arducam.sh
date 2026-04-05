@@ -70,8 +70,6 @@ if [ ! -f "$DRIVER_SRC/dkms.conf" ]; then
     cat > "$DRIVER_SRC/dkms.conf" <<DKMS_CONF
 PACKAGE_NAME="${DRIVER_NAME}"
 PACKAGE_VERSION="${DRIVER_VER}"
-MAKE[0]="make -C /lib/modules/\${kernelver}/build M=\${dkms_tree}/\${PACKAGE_NAME}-\${PACKAGE_VERSION} modules"
-CLEAN="make -C /lib/modules/\${kernelver}/build M=\${dkms_tree}/\${PACKAGE_NAME}-\${PACKAGE_VERSION} clean"
 BUILT_MODULE_NAME[0]="${MODULE_NAME}"
 DEST_MODULE_LOCATION[0]="/kernel/drivers/media/i2c/"
 AUTOINSTALL="yes"
