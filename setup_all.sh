@@ -141,3 +141,49 @@ echo "    systemctl status file_server"
 echo "    ls -lh $TARGET_HOME/recordings/"
 echo "    curl http://localhost:8080/clips"
 echo ""
+
+# ── SurfTrak full-firmware extensions ─────────────────────────────────────────
+
+echo "[EXT] Installing new dependencies (hostapd, dnsmasq, ffmpeg)..."
+sudo apt-get install -y hostapd dnsmasq ffmpeg
+echo ""
+
+echo "[EXT] Installing Python packages..."
+pip3 install spidev RPi.GPIO bleak rpi-ws281x bless --break-system-packages
+echo ""
+
+echo "[EXT] Enabling SPI interface..."
+if ! grep -q "dtparam=spi=on" /boot/firmware/config.txt 2>/dev/null; then
+    echo "dtparam=spi=on" | sudo tee -a /boot/firmware/config.txt
+    echo "    Added: dtparam=spi=on to /boot/firmware/config.txt"
+elif ! grep -q "dtparam=spi=on" /boot/config.txt 2>/dev/null; then
+    echo "dtparam=spi=on" | sudo tee -a /boot/config.txt
+    echo "    Added: dtparam=spi=on to /boot/config.txt"
+else
+    echo "    SPI already enabled — skipping."
+fi
+echo ""
+
+echo "[EXT] Running hotspot setup..."
+bash "$SCRIPT_DIR/setup_hotspot.sh"
+echo ""
+
+echo "[EXT] Swapping to surftrak.service (replacing ble_server + file_server)..."
+sudo systemctl disable ble_server.service file_server.service 2>/dev/null || true
+sed "s|User=pi|User=$TARGET_USER|g; s|/home/pi/|$TARGET_HOME/|g" \
+    "$SCRIPT_DIR/surftrak.service" | sudo tee /etc/systemd/system/surftrak.service > /dev/null
+sudo chmod 644 /etc/systemd/system/surftrak.service
+sudo systemctl daemon-reload
+sudo systemctl enable surftrak.service
+echo "    Installed: /etc/systemd/system/surftrak.service"
+echo ""
+
+echo "[EXT] Creating required directories..."
+mkdir -p "$TARGET_HOME/logs" "$TARGET_HOME/.surftrak" "$TARGET_HOME/recordings"
+chown -R "$TARGET_USER:$TARGET_USER" \
+    "$TARGET_HOME/logs" "$TARGET_HOME/.surftrak" "$TARGET_HOME/recordings"
+echo ""
+
+echo "[EXT] SurfTrak firmware installed. Reboot to start."
+echo "    sudo journalctl -u surftrak -f   # runtime logs"
+echo ""

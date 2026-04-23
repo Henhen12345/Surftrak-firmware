@@ -1,0 +1,15 @@
+[Unit]
+Description=SurfTrak Main Service
+After=network.target hostapd.service
+
+[Service]
+ExecStart=/usr/bin/python3 /home/pi/Surftrak-firmware/main.py
+WorkingDirectory=/home/pi/Surftrak-firmware
+Restart=always
+RestartSec=5
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
+from shared import CONFIG_DIR
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 HOST           = "0.0.0.0"
@@ -75,6 +77,8 @@ class Handler(BaseHTTPRequestHandler):
             self._download_clip(safe_filename(self.path[len("/clips/"):]))
         elif self.path == "/status":
             self._get_status()
+        elif self.path == "/diagnostic":
+            self._get_diagnostic()
         else:
             self._json(404, {"error": "not found"})
 
@@ -154,6 +158,17 @@ class Handler(BaseHTTPRequestHandler):
             "clip_count": len(get_clips()),
             "disk_free_gb": disk_free_gb,
         })
+
+    def _get_diagnostic(self):
+        diag_file = CONFIG_DIR / "last_diagnostic.json"
+        if not diag_file.exists():
+            self._json(200, {"error": "no diagnostic run yet"})
+            return
+        try:
+            data = json.loads(diag_file.read_text())
+            self._json(200, data)
+        except Exception as e:
+            self._json(500, {"error": str(e)})
 
     # ── Utility ───────────────────────────────────────────────────────────────
 

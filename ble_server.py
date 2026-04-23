@@ -17,6 +17,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -28,21 +30,22 @@ from bless import (
     GATTAttributePermissions,
 )
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-
-SERVICE_UUID = "12345678-1234-1234-1234-123456789012"
-RECORD_UUID  = "12345678-1234-1234-1234-123456789013"
-STATUS_UUID  = "12345678-1234-1234-1234-123456789014"
-CLIPS_UUID   = "12345678-1234-1234-1234-123456789015"
-
-RECORDINGS_DIR = Path.home() / "recordings"
-STATE_FILE     = Path("/tmp/surftrak_state.json")
+from shared import (
+    SERVICE_UUID,
+    RECORD_UUID,
+    STATUS_UUID,
+    CLIPS_UUID,
+    RECORDINGS_DIR,
+    STATE_FILE,
+    CONFIG_DIR,
+)
 
 # ── Mutable state ─────────────────────────────────────────────────────────────
 
 _proc: Optional[subprocess.Popen] = None
 _current_clip: Optional[str] = None
 _server: Optional[BlessServer] = None
+_beacon_manager = None   # injected by main.py
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -66,18 +69,44 @@ def get_clips() -> list:
     return [p.name for p in clips]
 
 
-def notify_status(status: str) -> None:
-    """Push a status string to connected iOS client via notification."""
+def _send_status_notification(msg: str) -> None:
+    """Low-level: push a single status packet to the connected client."""
     if _server is None:
         return
     try:
         char = _server.get_characteristic(STATUS_UUID)
         if char:
-            char.value = bytearray(status.encode())
+            char.value = bytearray(msg.encode())
             _server.update_value(SERVICE_UUID, STATUS_UUID)
-            print(f"[BLE] Status → {status}", flush=True)
+            print(f"[BLE] Status → {msg}", flush=True)
     except Exception as e:
         print(f"[BLE] Failed to notify status: {e}", flush=True)
+
+
+def notify_status(status: str, payload: Optional[str] = None) -> None:
+    """Push status to connected iOS client.
+
+    If *payload* is provided and exceeds 512 bytes (BLE MTU limit) it is
+    delivered in chunks: DIAG_START … DIAG_<chunk> … DIAG_END.
+    """
+    _send_status_notification(status)
+
+    if payload is None:
+        return
+
+    encoded = payload.encode()
+    if len(encoded) <= 512:
+        _send_status_notification(f"DIAG_{payload}")
+        return
+
+    # Chunked delivery for large payloads (e.g. diagnostic JSON)
+    _send_status_notification("DIAG_START")
+    chunk_size = 490   # "DIAG_" prefix (5 bytes) + chunk ≤ 495 < 512
+    for i in range(0, len(encoded), chunk_size):
+        chunk = encoded[i:i + chunk_size].decode(errors="replace")
+        _send_status_notification(f"DIAG_{chunk}")
+        time.sleep(0.05)   # brief pause to avoid flooding
+    _send_status_notification("DIAG_END")
 
 
 def notify_clips() -> None:
@@ -237,8 +266,49 @@ def write_request(characteristic: BlessGATTCharacteristic, value: Any, **kwargs)
         start_recording()
     elif cmd == "STOP":
         stop_recording()
+    elif cmd == "PAIR":
+        _handle_pair()
+    elif cmd == "DIAGNOSTIC":
+        _handle_diagnostic()
     else:
         notify_status(f"ERROR:unknown command {cmd}")
+
+# ── PAIR / DIAGNOSTIC handlers ────────────────────────────────────────────────
+
+def _handle_pair() -> None:
+    """Initiate BLE beacon pairing in a background thread."""
+    notify_status("PAIRING")
+
+    def _pair_worker():
+        if _beacon_manager is None:
+            notify_status("PAIR_FAILED")
+            return
+        try:
+            address = _beacon_manager.pair(timeout=30)
+            if address:
+                notify_status(f"PAIRED:{address}")
+            else:
+                notify_status("PAIR_FAILED")
+        except Exception as e:
+            print(f"[BLE] Pair error: {e}", flush=True)
+            notify_status("PAIR_FAILED")
+
+    threading.Thread(target=_pair_worker, daemon=True).start()
+
+
+def _handle_diagnostic() -> None:
+    """Read last_diagnostic.json and send it as chunked Status notifications."""
+    diag_file = CONFIG_DIR / "last_diagnostic.json"
+    try:
+        if not diag_file.exists():
+            notify_status("DIAGNOSTIC", payload='{"error":"no diagnostic run yet"}')
+            return
+        content = diag_file.read_text()
+        notify_status("DIAGNOSTIC", payload=content)
+    except Exception as e:
+        print(f"[BLE] Diagnostic read error: {e}", flush=True)
+        notify_status(f"ERROR:diagnostic read failed: {e}")
+
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
