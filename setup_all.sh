@@ -36,14 +36,14 @@ echo ""
 
 # ── Step 1: Install dependencies ─────────────────────────────────────────────
 
-echo "[1/8] Installing dependencies (bless, ffmpeg)..."
+echo "[1/9] Installing dependencies (bless, ffmpeg, hostapd, dnsmasq)..."
 pip install bless --break-system-packages
-apt-get install -y ffmpeg
+apt-get install -y ffmpeg hostapd dnsmasq
 echo ""
 
 # ── Step 2: Configure and enable Bluetooth ───────────────────────────────────
 
-echo "[2/8] Configuring Bluetooth..."
+echo "[2/9] Configuring Bluetooth..."
 
 # Enable experimental mode in BlueZ — required for GATT peripheral advertising
 BTCONF=/etc/bluetooth/main.conf
@@ -73,7 +73,7 @@ echo ""
 
 # ── Step 3: Create recordings directory ──────────────────────────────────────
 
-echo "[3/8] Creating recordings directory..."
+echo "[3/9] Creating recordings directory..."
 mkdir -p "$TARGET_HOME/recordings"
 chown "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/recordings"
 echo "    Created: $TARGET_HOME/recordings"
@@ -81,16 +81,42 @@ echo ""
 
 # ── Step 4: Copy Python scripts ──────────────────────────────────────────────
 
-echo "[4/8] Copying ble_server.py and file_server.py..."
+echo "[4/9] Copying Python scripts and hotspot helper..."
 cp "$SCRIPT_DIR/ble_server.py"   "$TARGET_HOME/ble_server.py"
 cp "$SCRIPT_DIR/file_server.py"  "$TARGET_HOME/file_server.py"
-chown "$TARGET_USER:$TARGET_USER" "$TARGET_HOME/ble_server.py" "$TARGET_HOME/file_server.py"
-chmod 755 "$TARGET_HOME/ble_server.py" "$TARGET_HOME/file_server.py"
+cp "$SCRIPT_DIR/hotspot.sh"      "$TARGET_HOME/hotspot.sh"
+chown "$TARGET_USER:$TARGET_USER" \
+    "$TARGET_HOME/ble_server.py" \
+    "$TARGET_HOME/file_server.py" \
+    "$TARGET_HOME/hotspot.sh"
+chmod 755 \
+    "$TARGET_HOME/ble_server.py" \
+    "$TARGET_HOME/file_server.py" \
+    "$TARGET_HOME/hotspot.sh"
 echo ""
 
-# ── Step 5: Install systemd service files ────────────────────────────────────
+# ── Step 5: Configure hotspot helper ─────────────────────────────────────────
 
-echo "[5/8] Installing systemd service files..."
+echo "[5/9] Configuring hotspot helper (sudoers + disable system services)..."
+
+# Grant passwordless sudo for the hotspot script only
+SUDOERS_FILE="/etc/sudoers.d/surftrak-hotspot"
+echo "$TARGET_USER ALL=(ALL) NOPASSWD: $TARGET_HOME/hotspot.sh" > "$SUDOERS_FILE"
+chmod 440 "$SUDOERS_FILE"
+echo "    Sudoers rule: $SUDOERS_FILE"
+
+# Disable the system-level hostapd and dnsmasq services — SurfTrak manages
+# these processes directly via hotspot.sh, not via systemd units.
+systemctl disable hostapd.service 2>/dev/null || true
+systemctl stop    hostapd.service 2>/dev/null || true
+systemctl disable dnsmasq.service 2>/dev/null || true
+systemctl stop    dnsmasq.service 2>/dev/null || true
+echo "    hostapd and dnsmasq system services disabled (managed by hotspot.sh)"
+echo ""
+
+# ── Step 6: Install systemd service files ────────────────────────────────────
+
+echo "[6/9] Installing systemd service files..."
 
 # Patch User= and home directory paths to match the real username
 for SVC in ble_server file_server; do
@@ -101,22 +127,22 @@ for SVC in ble_server file_server; do
 done
 echo ""
 
-# ── Step 6: Reload systemd ────────────────────────────────────────────────────
+# ── Step 7: Reload systemd ────────────────────────────────────────────────────
 
-echo "[6/8] Reloading systemd daemon..."
+echo "[7/9] Reloading systemd daemon..."
 systemctl daemon-reload
 echo ""
 
-# ── Step 7: Enable services ───────────────────────────────────────────────────
+# ── Step 8: Enable services ───────────────────────────────────────────────────
 
-echo "[7/8] Enabling services on boot..."
+echo "[8/9] Enabling services on boot..."
 systemctl enable ble_server.service
 systemctl enable file_server.service
 echo ""
 
-# ── Step 8: Start services ────────────────────────────────────────────────────
+# ── Step 9: Start services ────────────────────────────────────────────────────
 
-echo "[8/8] Starting services..."
+echo "[9/9] Starting services..."
 systemctl start file_server.service
 systemctl start ble_server.service
 echo ""
@@ -129,8 +155,9 @@ echo "╔═══════════════════════�
 echo "║          SurfTrak firmware installed!        ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
-echo "  BLE       : Pi advertising as 'SurfTrak'"
-echo "  File server: http://${PI_IP}:8080"
+echo "  BLE        : Pi advertising as 'SurfTrak'"
+echo "  File server: http://${PI_IP}:8080  (WiFi client mode)"
+echo "               http://192.168.50.1:8080  (hotspot mode)"
 echo "  Recordings : $TARGET_HOME/recordings/"
 echo ""
 echo "  Useful commands:"
@@ -140,4 +167,5 @@ echo "    systemctl status ble_server"
 echo "    systemctl status file_server"
 echo "    ls -lh $TARGET_HOME/recordings/"
 echo "    curl http://localhost:8080/clips"
+echo "    curl http://localhost:8080/status"
 echo ""

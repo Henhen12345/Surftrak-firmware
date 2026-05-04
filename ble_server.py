@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -35,14 +36,19 @@ RECORD_UUID  = "12345678-1234-1234-1234-123456789013"
 STATUS_UUID  = "12345678-1234-1234-1234-123456789014"
 CLIPS_UUID   = "12345678-1234-1234-1234-123456789015"
 
-RECORDINGS_DIR = Path.home() / "recordings"
-STATE_FILE     = Path("/tmp/surftrak_state.json")
+RECORDINGS_DIR   = Path.home() / "recordings"
+STATE_FILE       = Path("/tmp/surftrak_state.json")
+HOTSPOT_SCRIPT   = Path.home() / "hotspot.sh"
+TRANSFER_TIMEOUT = 180  # seconds before hotspot auto-tears-down after STOP
 
 # ── Mutable state ─────────────────────────────────────────────────────────────
 
 _proc: Optional[subprocess.Popen] = None
 _current_clip: Optional[str] = None
 _server: Optional[BlessServer] = None
+_loop: Optional[asyncio.AbstractEventLoop] = None
+_hotspot_active: bool = False
+_transfer_timer: Optional[threading.Timer] = None
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -92,10 +98,120 @@ def notify_clips() -> None:
     except Exception as e:
         print(f"[BLE] Failed to notify clips: {e}", flush=True)
 
+# ── Hotspot management ────────────────────────────────────────────────────────
+
+def get_wifi_mac_suffix() -> str:
+    """Return the last 4 hex characters of the wlan0 MAC address."""
+    try:
+        mac = Path("/sys/class/net/wlan0/address").read_text().strip()
+        return mac.replace(":", "")[-4:].upper()
+    except Exception:
+        return "0000"
+
+
+def enable_hotspot() -> bool:
+    """Switch wlan0 to AP mode via hotspot.sh. Returns True on success. Blocking."""
+    global _hotspot_active
+    ssid = f"SurfTrak-{get_wifi_mac_suffix()}"
+    print(f"[BLE] Bringing up hotspot: {ssid}", flush=True)
+    try:
+        result = subprocess.run(
+            ["sudo", str(HOTSPOT_SCRIPT), "enable", ssid],
+            capture_output=True,
+            timeout=20,
+        )
+        if result.returncode == 0:
+            _hotspot_active = True
+            print(f"[BLE] Hotspot active: {ssid} @ 192.168.50.1:8080", flush=True)
+            return True
+        err = result.stderr.decode(errors="ignore").strip()
+        print(f"[BLE] Hotspot enable failed (rc={result.returncode}): {err}", flush=True)
+        return False
+    except subprocess.TimeoutExpired:
+        print("[BLE] Hotspot enable timed out", flush=True)
+        return False
+    except Exception as e:
+        print(f"[BLE] Hotspot enable error: {e}", flush=True)
+        return False
+
+
+def disable_hotspot() -> None:
+    """Tear down the AP and return to WiFi client mode via hotspot.sh. Blocking."""
+    global _hotspot_active
+    _hotspot_active = False  # mark inactive immediately to prevent double-teardown
+    print("[BLE] Tearing down hotspot", flush=True)
+    try:
+        result = subprocess.run(
+            ["sudo", str(HOTSPOT_SCRIPT), "disable"],
+            capture_output=True,
+            timeout=20,
+        )
+        if result.returncode == 0:
+            print("[BLE] WiFi client mode restored", flush=True)
+        else:
+            err = result.stderr.decode(errors="ignore").strip()
+            print(f"[BLE] Hotspot disable failed (rc={result.returncode}): {err}", flush=True)
+    except subprocess.TimeoutExpired:
+        print("[BLE] Hotspot disable timed out", flush=True)
+    except Exception as e:
+        print(f"[BLE] Hotspot disable error: {e}", flush=True)
+
+# ── Transfer timer ────────────────────────────────────────────────────────────
+
+def _start_transfer_timer() -> None:
+    global _transfer_timer
+    _transfer_timer = threading.Timer(TRANSFER_TIMEOUT, _on_transfer_timeout)
+    _transfer_timer.daemon = True
+    _transfer_timer.start()
+    print(f"[BLE] Transfer timeout armed: {TRANSFER_TIMEOUT}s", flush=True)
+
+
+def _cancel_transfer_timer() -> None:
+    global _transfer_timer
+    if _transfer_timer is not None:
+        _transfer_timer.cancel()
+        _transfer_timer = None
+
+
+def _on_transfer_timeout() -> None:
+    """Called by threading.Timer after TRANSFER_TIMEOUT seconds. Runs in timer thread."""
+    if not _hotspot_active:
+        return
+    print("[BLE] Transfer timeout — tearing down hotspot", flush=True)
+    if _loop and _loop.is_running():
+        # Schedule teardown back on the event loop thread so notify_status is safe
+        asyncio.run_coroutine_threadsafe(_tear_down_hotspot(), _loop)
+
+# ── Async hotspot task helpers ────────────────────────────────────────────────
+
+async def _bring_up_hotspot() -> None:
+    """Enable hotspot in a thread pool so the BLE event loop stays responsive."""
+    loop = asyncio.get_running_loop()
+    success = await loop.run_in_executor(None, enable_hotspot)
+    if success:
+        notify_status("HOTSPOT_READY")
+        _start_transfer_timer()
+    else:
+        notify_status("IDLE")
+
+
+async def _tear_down_hotspot() -> None:
+    """Disable hotspot in a thread pool, then send IDLE. Idempotent."""
+    if not _hotspot_active:
+        return
+    _cancel_transfer_timer()
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, disable_hotspot)
+    notify_status("IDLE")
+
 # ── Recording control ─────────────────────────────────────────────────────────
 
 def start_recording() -> None:
     global _proc, _current_clip
+
+    if _hotspot_active:
+        notify_status("ERROR:cannot record during transfer")
+        return
 
     if _proc is not None:
         notify_status("ERROR:already recording")
@@ -142,7 +258,9 @@ def stop_recording() -> None:
     global _proc, _current_clip
 
     if _proc is None:
-        notify_status("IDLE")
+        # Not recording — only send IDLE if we're not already in a transfer
+        if not _hotspot_active:
+            notify_status("IDLE")
         return
 
     clip_names = _current_clip  # (h264_filename, mp4_filename)
@@ -171,8 +289,13 @@ def stop_recording() -> None:
     else:
         print("[BLE] Recording stopped.", flush=True)
 
-    notify_status("IDLE")
     notify_clips()
+
+    # Kick off hotspot bring-up asynchronously so we don't block the BLE event loop
+    if _loop and _loop.is_running():
+        _loop.create_task(_bring_up_hotspot())
+    else:
+        notify_status("IDLE")
 
 
 def _wrap_to_mp4(h264_path: Path, mp4_path: Path) -> None:
@@ -237,21 +360,31 @@ def write_request(characteristic: BlessGATTCharacteristic, value: Any, **kwargs)
         start_recording()
     elif cmd == "STOP":
         stop_recording()
+    elif cmd == "TRANSFER_COMPLETE":
+        if _hotspot_active:
+            if _loop and _loop.is_running():
+                _loop.create_task(_tear_down_hotspot())
+            else:
+                _cancel_transfer_timer()
+                disable_hotspot()
+                notify_status("IDLE")
+        else:
+            notify_status("IDLE")
     else:
         notify_status(f"ERROR:unknown command {cmd}")
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 async def run() -> None:
-    global _server
+    global _server, _loop
 
     RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
     write_state(False, None)
 
-    loop = asyncio.get_event_loop()
+    _loop = asyncio.get_running_loop()
     trigger = asyncio.Event()
 
-    _server = BlessServer(name="SurfTrak", loop=loop)
+    _server = BlessServer(name="SurfTrak", loop=_loop)
     _server.read_request_func = read_request
     _server.write_request_func = write_request
 
@@ -294,16 +427,25 @@ async def run() -> None:
     await trigger.wait()
 
 
+def _emergency_cleanup() -> None:
+    """Best-effort cleanup on crash or interrupt."""
+    _cancel_transfer_timer()
+    if _hotspot_active:
+        disable_hotspot()
+    if _proc is not None:
+        stop_recording()
+
+
 if __name__ == "__main__":
     while True:
         try:
             asyncio.run(run())
         except KeyboardInterrupt:
             print("[BLE] Interrupted — stopping.", flush=True)
-            stop_recording()
+            _emergency_cleanup()
             sys.exit(0)
         except Exception as e:
             print(f"[BLE] Fatal error: {e} — restarting in 3s", flush=True)
-            stop_recording()
+            _emergency_cleanup()
             import time
             time.sleep(3)
